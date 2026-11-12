@@ -33,7 +33,12 @@ let book = null; // the contract, opened with the current wallet (or read-only)
 let money = MONEY.XLM;
 let holdings = null; // what the connected wallet holds: { exists, balance, canHold }
 let circles = [];
-let active = Number(new URLSearchParams(location.search).get("circle")) || 0;
+// A circle opened from an invite link (?circle=3). It is the only circle a
+// visitor who is not yet a member can open, and they see just enough to join.
+const invitedParam = new URLSearchParams(location.search).get("circle");
+const invited = invitedParam !== null && /^\d+$/.test(invitedParam) ? Number(invitedParam) : -1;
+let active = invited; // index into `circles` of the page that is open (-1 = none)
+let deskOpen = false; // is the "start a new circle" form showing?
 let history = null; // the book's recent history, newest first (null = not loaded)
 let joinNameDraft = ""; // what a visitor has typed in the "join" line, kept across refreshes
 let busy = false;
@@ -154,6 +159,8 @@ async function connect({ quiet = false } = {}) {
 
 function signOut() {
   wallet = null;
+  deskOpen = false;
+  $("new-circle-btn").textContent = "＋ Start a new circle";
   holdings = null;
   book = contractId ? openBook(contractId, null) : null;
   note("");
@@ -213,7 +220,8 @@ async function refresh() {
     const [token, list] = await Promise.all([book.token(), book.circles()]);
     money = moneyBySac(token);
     circles = list;
-    if (active >= circles.length) active = Math.max(0, circles.length - 1);
+    const visible = visibleCircles();
+    if (!visible.includes(active)) active = visible.length ? visible[0] : -1;
     if (wallet) holdings = await walletMoney(wallet.publicKey, money).catch(() => null);
   } catch (e) {
     console.error(e);
@@ -228,7 +236,8 @@ async function refresh() {
   renderWallet();
   renderTabs();
   renderSheet();
-  $("circle-desk").hidden = !wallet;
+  $("new-circle-btn").hidden = !wallet;
+  $("circle-desk").hidden = !(wallet && deskOpen);
   // The history is a nice-to-have: load it after the page, and never let it break the book.
   book
     .history()
@@ -241,13 +250,15 @@ async function refresh() {
 
 function renderTabs() {
   const nav = $("page-tabs");
-  if (circles.length <= 1) {
+  const visible = visibleCircles();
+  if (visible.length <= 1) {
     nav.innerHTML = "";
     return;
   }
-  nav.innerHTML = circles
+  nav.innerHTML = visible
+    .map((i) => [circles[i], i])
     .map(
-      (c, i) => `<button class="page-tab" role="tab" aria-selected="${i === active}" data-circle="${i}">
+      ([c, i]) => `<button class="page-tab" role="tab" aria-selected="${i === active}" data-circle="${i}">
         ${escapeHtml(c.name)}${c.finished ? `<span class="tab-closed">· done</span>` : ""}
       </button>`
     )
@@ -261,18 +272,33 @@ function renderTabs() {
   });
 }
 
+// The app only opens the circles this wallet belongs to, plus the one it was
+// invited to. (The book itself is public on Stellar: this keeps other
+// people's circles out of the way, it does not make them secret.)
+const isMine = (c) => Boolean(wallet) && c.members.includes(wallet.publicKey);
+const visibleCircles = () => circles.map((c, i) => i).filter((i) => isMine(circles[i]) || i === invited);
+
 // ---------- one circle = one page of the book ----------
 
 function renderSheet() {
   const sheet = $("sheet");
-  if (!circles.length) {
+  if (active < 0 || !circles[active]) {
     sheet.innerHTML = `
       <header class="sheet-head">
         <span class="sheet-kicker">Esusu</span>
-        <h2 class="sheet-title">No circles yet</h2>
+        <h2 class="sheet-title">${wallet ? "You’re not in a circle yet" : "Your circles"}</h2>
       </header>
-      <p class="empty-invite">${wallet ? "Host one below — you’ll get a link to share with your members." : "Open your wallet to host a circle."}</p>
-      ${`<div class="blank-rule"></div>`.repeat(4)}`;
+      <p class="empty-invite">${
+        wallet
+          ? "Start a new circle and share its link, or open the invite link your host sent you."
+          : "Open your wallet to see the circles you belong to. Each circle is only shown to its own members."
+      }</p>
+      <div class="page-actions">${
+        wallet ? `<button class="btn btn-ink" data-new-circle>＋ Start a new circle</button>` : `<button class="btn btn-ink" data-connect>Open my wallet</button>`
+      }</div>
+      ${`<div class="blank-rule"></div>`.repeat(3)}`;
+    sheet.querySelector("[data-connect]")?.addEventListener("click", () => connect());
+    sheet.querySelector("[data-new-circle]")?.addEventListener("click", () => openDesk());
     return;
   }
 
@@ -400,7 +426,11 @@ function renderSheet() {
       <p class="sheet-terms">${terms}</p>
       <p class="sheet-details">Turns go in the order below. Nobody holds the money: the contract pays the person whose turn it is as soon as everyone has paid.</p>
     </header>
-    <ol class="entries">${rows}</ol>
+    ${
+      isMember
+        ? `<ol class="entries">${rows}</ol>`
+        : `<p class="empty-invite">Hosted by <b>${escapeHtml(c.names[c.members.indexOf(c.organizer)] || "the host")}</b> · ${n} ${n === 1 ? "member" : "members"} so far. Join to see the book.</p>`
+    }
     ${joinForm}
     ${
       c.started
@@ -481,6 +511,10 @@ function renderHistory() {
   const el = $("history");
   const c = circles[active];
   if (!el || !c || !history) return;
+  if (!isMine(c)) {
+    el.innerHTML = "";
+    return;
+  }
   const lines = history.filter((h) => h.circle === Number(c.id) && HISTORY_LINES[h.kind]).slice(0, 40);
   if (!lines.length) {
     el.innerHTML = "";
@@ -500,6 +534,18 @@ function renderHistory() {
 }
 
 // ---------- hosting a circle ----------
+
+function openDesk(show = true) {
+  if (!wallet) return connect();
+  deskOpen = show;
+  $("circle-desk").hidden = !show;
+  $("new-circle-btn").textContent = show ? "Close" : "＋ Start a new circle";
+  if (show) {
+    $("circle-desk").scrollIntoView({ behavior: "smooth", block: "start" });
+    $("circle-form").elements.name.focus({ preventScroll: true });
+  }
+}
+$("new-circle-btn").onclick = () => openDesk(!deskOpen);
 
 $("circle-form").onsubmit = async (e) => {
   e.preventDefault();
@@ -522,6 +568,7 @@ $("circle-form").onsubmit = async (e) => {
   const ok = await act("Opening the circle", () => book.createCircle({ name, hostName, contribution, roundDuration: Number(f.get("frequency")), deposit }), { paying: true });
   if (ok) {
     e.target.reset();
+    openDesk(false);
     active = circles.length - 1;
     renderTabs();
     renderSheet();
@@ -534,6 +581,7 @@ $("circle-form").onsubmit = async (e) => {
 
 function renderSetup() {
   $("circle-desk").hidden = true;
+  $("new-circle-btn").hidden = true;
   $("page-tabs").innerHTML = "";
   $("sheet").innerHTML = `
     <header class="sheet-head">

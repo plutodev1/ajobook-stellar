@@ -363,3 +363,5 @@ a.net-btn { text-decoration: none; display: inline-block; }
 .history li span:last-child { white-space: nowrap; opacity: 0.7; }
 .history a { color: inherit; }
 @media (max-width: 560px) { .invite { flex-direction: column; align-items: flex-start; } }
+
+.new-circle-row { display: flex; justify-content: center; margin: 18px 0 0; }
